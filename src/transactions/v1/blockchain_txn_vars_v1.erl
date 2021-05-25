@@ -864,8 +864,6 @@ validate_var(?min_assert_h3_res, Value) ->
     validate_int(Value, "min_assert_h3_res", 0, 15, false);
 %%validate_var(?poc_challenge_interval, Value) ->
 %%    validate_int(Value, "poc_challenge_interval", 10, 1440, false);
-validate_var(?poc_challenge_interval, undefined) ->
-    ok;
 validate_var(?poc_version, Value) ->
     case Value of
         N when is_integer(N), N >= 1,  N =< 10 ->
@@ -935,8 +933,8 @@ validate_var(?poc_addr_hash_byte_count, Value) ->
 %% score vars
 validate_var(?alpha_decay, Value) ->
     validate_float(Value, "alpha_decay", 0.0, 0.1);
-validate_var(?beta_decay, Value) ->
-    validate_float(Value, "beta_decay", 0.0, 0.1);
+%%validate_var(?beta_decay, Value) ->
+%%    validate_float(Value, "beta_decay", 0.0, 0.1);
 validate_var(?max_staleness, Value) ->
     validate_int(Value, "max_staleness", 1000, 1000000, false);
 
