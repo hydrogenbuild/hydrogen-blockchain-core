@@ -123,7 +123,7 @@
 -define(h3_neighbor_res, h3_neighbor_res).
 
 %% Required minimum score for neighbors to be included in poc path
--define(min_score, 0).
+-define(min_score, min_score).
 
 %% Required minimum h3 assert location resolution for assert_loc txn
 -define(min_assert_h3_res, min_assert_h3_res).
@@ -138,17 +138,17 @@
 %% challenge. This would avoid new hotspots getting challenged before they sync to an
 %% acceptable height.
 %% Only trigger with poc_version >= 2.
--define(poc_challenge_sync_interval, 60).
+-define(poc_challenge_sync_interval, poc_challenge_sync_interval).
 
 %% Number of hotspots allowed in a poc path
--define(poc_path_limit, 30).
+-define(poc_path_limit, poc_path_limit).
 
 %% whether to fix some typos in the PoC generation/validation code
 -define(poc_typo_fixes, poc_typo_fixes).
 
 %% Number of witnesses allowed to be considered per step of a path or
 %% during targeting
--define(poc_witness_consideration_limit, 30).
+-define(poc_witness_consideration_limit, poc_witness_consideration_limit).
 
 
 -define(poc_addr_hash_byte_count, poc_addr_hash_byte_count).
@@ -159,12 +159,12 @@
 %% Rate of decay for score alpha parameter
 %% This acts like network gravity and keeps hotspots from staying at the top of the score graph
 %% for longer periods of time without actually participating in POC
--define(alpha_decay, 0).
+-define(alpha_decay, alpha_decay).
 
 %% Rate of decay for score beta parameter
 %% This acts like network gravity and keeps hotspots from staying at the bottom of the score graph
 %% for longer periods of time without actually participating in POC
--define(beta_decay, 0).
+-define(beta_decay, beta_decay).
 
 %% Acts as a limiting factor to avoid overflowing the decay
 -define(max_staleness, max_staleness).
@@ -229,7 +229,7 @@
 %% ------------------------------------------------------------------
 
 %% A potential target must have a last poc challenge within this challenge_age
--define(poc_v4_target_challenge_age, 300). %% default: 300
+-define(poc_v4_target_challenge_age, poc_v4_target_challenge_age). %% default: 300
 %% Score curve to calculate the target score probability
 -define(poc_v4_target_score_curve, poc_v4_target_score_curve). %% default: 5
 
