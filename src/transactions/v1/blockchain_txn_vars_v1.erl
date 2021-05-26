@@ -861,7 +861,7 @@ validate_var(?min_score, Value) ->
 validate_var(?min_assert_h3_res, Value) ->
     validate_int(Value, "min_assert_h3_res", 0, 15, false);
 validate_var(?poc_challenge_interval, Value) ->
-    validate_int(Value, "poc_challenge_interval", 40, 1440, false);
+    validate_int(Value, "poc_challenge_interval", 10, 1440, false);
 validate_var(?poc_version, Value) ->
     case Value of
         N when is_integer(N), N >= 1,  N =< 10 ->
