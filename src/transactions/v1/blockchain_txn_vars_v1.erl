@@ -856,14 +856,12 @@ validate_var(?h3_max_grid_distance, Value) ->
     validate_int(Value, "h3_max_grid_distance", 1, 500, false);
 validate_var(?h3_neighbor_res, Value) ->
     validate_int(Value, "h3_neighbor_res", 0, 15, false);
-%%validate_var(?min_score, Value) ->
-%%    validate_float(Value, "min_score", 0.0, 0.3);
-validate_var(?min_score, undefined) ->
-    ok;
+validate_var(?min_score, Value) ->
+    validate_float(Value, "min_score", 0.0, 0.3);
 validate_var(?min_assert_h3_res, Value) ->
     validate_int(Value, "min_assert_h3_res", 0, 15, false);
-%%validate_var(?poc_challenge_interval, Value) ->
-%%    validate_int(Value, "poc_challenge_interval", 10, 1440, false);
+validate_var(?poc_challenge_interval, Value) ->
+    validate_int(Value, "poc_challenge_interval", 40, 1440, false);
 validate_var(?poc_version, Value) ->
     case Value of
         N when is_integer(N), N >= 1,  N =< 10 ->
@@ -875,8 +873,8 @@ validate_var(?poc_challenge_sync_interval, Value) ->
     validate_int(Value, "poc_challenge_sync_interval", 10, 1440, false);
 validate_var(?poc_path_limit, undefined) ->
     ok;
-%%validate_var(?poc_path_limit, Value) ->
-%%    validate_int(Value, "poc_path_limit", 1, 10, false);
+validate_var(?poc_path_limit, Value) ->
+    validate_int(Value, "poc_path_limit", 1, 10, false);
 validate_var(?poc_witness_consideration_limit, Value) ->
     validate_int(Value, "poc_witness_consideration_limit", 10, 100, false);
 validate_var(?poc_v4_exclusion_cells, Value) ->
@@ -933,8 +931,8 @@ validate_var(?poc_addr_hash_byte_count, Value) ->
 %% score vars
 validate_var(?alpha_decay, Value) ->
     validate_float(Value, "alpha_decay", 0.0, 0.1);
-%%validate_var(?beta_decay, Value) ->
-%%    validate_float(Value, "beta_decay", 0.0, 0.1);
+validate_var(?beta_decay, Value) ->
+    validate_float(Value, "beta_decay", 0.0, 0.1);
 validate_var(?max_staleness, Value) ->
     validate_int(Value, "max_staleness", 1000, 1000000, false);
 
