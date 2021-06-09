@@ -55,8 +55,16 @@
     have_snapshot/2, get_snapshot/2, find_last_snapshot/1,
     find_last_snapshots/2,
 
-    mark_upgrades/2, bootstrap_h3dex/1,
-    snapshot_height/1
+    add_implicit_burn/3,
+    get_implicit_burn/2,
+
+    mark_upgrades/2, get_upgrades/1, bootstrap_h3dex/1,
+    snapshot_height/1,
+
+    db_handle/1,
+    blocks_cf/1,
+    heights_cf/1
+
 ]).
 
 -include("blockchain.hrl").
@@ -80,6 +88,7 @@
     temp_blocks :: rocksdb:cf_handle(),
     plausible_blocks :: rocksdb:cf_handle(),
     snapshots :: rocksdb:cf_handle(),
+    implicit_burns :: rocksdb:cf_handle(),
     ledger :: blockchain_ledger_v1:ledger()
 }).
 
@@ -182,6 +191,7 @@ process_upgrades([{Key, Fun} | Tail], Ledger) ->
         true ->
             ok;
         false ->
+            lager:info("running ledger upgrade ~p", [Key]),
             Ledger1 = blockchain_ledger_v1:new_context(Ledger),
             Fun(Ledger1),
             blockchain_ledger_v1:mark_key(Key, Ledger1),
@@ -231,6 +241,10 @@ upgrade_gateways_lg(Ledger) ->
       end,
       whatever,
       Ledger).
+
+-spec get_upgrades(blockchain_ledger_v1:ledger()) -> [binary()].
+get_upgrades(Ledger) ->
+    [ Key || Key <- ?BC_UPGRADE_NAMES, blockchain_ledger_v1:check_key(Key, Ledger) ].
 
 bootstrap_hexes(Ledger) ->
     %% hardcode this until we have the var update hook.
@@ -517,7 +531,6 @@ fold_blocks(Chain0, DelayedHeight, DelayedLedger, Height, ForceRecalc) ->
                                       %% make things faster in the future
                                       Ledger1 = ?MODULE:ledger(Chain1),
                                       {ok, NewLedger} = blockchain_ledger_v1:context_snapshot(Ledger1),
-                                      delayed = blockchain_ledger_v1:mode(NewLedger),
                                       {ok, blockchain:ledger(NewLedger, Chain1)};
                                   _ ->
                                       {ok, Chain1}
@@ -853,7 +866,7 @@ add_block_(Block, Blockchain, Syncing) ->
                     Height = blockchain_block:height(Block),
                     Hash = blockchain_block:hash_block(Block),
                     Sigs = blockchain_block:signatures(Block),
-                    MyAddress = blockchain_swarm:pubkey_bin(),
+                    MyAddress = try blockchain_swarm:pubkey_bin() catch _:_ -> nomatch end,
                     BeforeCommit = fun(FChain, FHash) ->
                                            lager:debug("adding block ~p", [Height]),
                                            ok = ?save_block(Block, Blockchain),
@@ -1205,12 +1218,13 @@ close(#blockchain{db=DB, ledger=Ledger}) ->
     catch blockchain_ledger_v1:close(Ledger),
     catch rocksdb:close(DB).
 
-compact(#blockchain{db=DB, default=Default, blocks=BlocksCF, heights=HeightsCF, temp_blocks=TempBlocksCF}) ->
+compact(#blockchain{db=DB, default=Default, blocks=BlocksCF, heights=HeightsCF, temp_blocks=TempBlocksCF, implicit_burns=ImplicitBurnsCF}) ->
     rocksdb:compact_range(DB, undefined, undefined, []),
     rocksdb:compact_range(DB, Default, undefined, undefined, []),
     rocksdb:compact_range(DB, BlocksCF, undefined, undefined, []),
     rocksdb:compact_range(DB, HeightsCF, undefined, undefined, []),
     rocksdb:compact_range(DB, TempBlocksCF, undefined, undefined, []),
+    rocksdb:compact_range(DB, ImplicitBurnsCF, undefined, undefined, []),
     ok.
 
 reset_ledger(Chain) ->
@@ -1626,7 +1640,7 @@ add_snapshot(Snapshot, #blockchain{db=DB, snapshots=SnapshotsCF}) ->
         ok = rocksdb:write_batch(DB, Batch0, []),
 
         {ok, Batch} = rocksdb:batch(),
-        {ok, BinSnap} = blockchain_ledger_snapshot_v1:serialize(Snapshot),
+        BinSnap = blockchain_ledger_snapshot_v1:serialize(Snapshot),
         ok = rocksdb:batch_put(Batch, SnapshotsCF, Hash, BinSnap),
         %% lexiographic ordering works better with big endian
         ok = rocksdb:batch_put(Batch, SnapshotsCF, <<Height:64/integer-unsigned-big>>, Hash),
@@ -1636,9 +1650,11 @@ add_snapshot(Snapshot, #blockchain{db=DB, snapshots=SnapshotsCF}) ->
             {error, Why}
     end.
 
--spec add_bin_snapshot(blockchain_ledger_snapshot:snapshot(), integer(), binary(), blockchain()) ->
+-spec add_bin_snapshot(blockchain_ledger_snapshot:snapshot(), integer(),
+                       none | binary(), blockchain()) ->
                               ok | {error, any()}.
-add_bin_snapshot(BinSnap, Height, Hash, #blockchain{db=DB, snapshots=SnapshotsCF}) ->
+add_bin_snapshot(_BinSnap, _Height, none, _Chain) -> {error, no_snapshot_hash};
+add_bin_snapshot(BinSnap, Height, Hash, #blockchain{db=DB, snapshots=SnapshotsCF}) when is_binary(Hash) ->
     try
         {ok, Batch} = rocksdb:batch(),
         ok = rocksdb:batch_put(Batch, SnapshotsCF, Hash, BinSnap),
@@ -1653,7 +1669,7 @@ add_bin_snapshot(BinSnap, Height, Hash, #blockchain{db=DB, snapshots=SnapshotsCF
 
 -spec get_snapshot(blockchain_block:hash() | integer(), blockchain()) ->
                           {ok, blockchain_ledger_snapshot:snapshot()} | {error, any()}.
-get_snapshot(Hash, #blockchain{db=DB, snapshots=SnapshotsCF}) when is_binary(Hash) ->
+get_snapshot(<<Hash/binary>>, #blockchain{db=DB, snapshots=SnapshotsCF}) ->
     case rocksdb:get(DB, SnapshotsCF, Hash, []) of
         {ok, <<"__sentinel__">>} ->
             {error, sentinel};
@@ -1714,6 +1730,27 @@ find_last_snapshots(Blockchain, Count0) ->
             lists:reverse(List)
     end.
 
+-spec get_implicit_burn(blockchain_txn:hash(), blockchain()) -> {ok, blockchain_implicit_burn:implicit_burn()} | {error, any()}.
+get_implicit_burn(TxnHash, #blockchain{db=DB, implicit_burns=ImplicitBurnsCF}) when is_binary(TxnHash) ->
+    case rocksdb:get(DB, ImplicitBurnsCF, TxnHash, []) of
+        {ok, Bin} ->
+            {ok, blockchain_implicit_burn:deserialize(Bin)};
+        not_found ->
+            {error, not_found};
+        Error ->
+            Error
+    end.
+
+-spec add_implicit_burn(blockchain_txn:hash(), blockchain_implicit_burn:implicit_burn(), blockchain()) -> ok | {error, any()}.
+add_implicit_burn(TxnHash, ImplicitBurn, #blockchain{db=DB, implicit_burns=ImplicitBurnsCF}) ->
+    try
+        BinImp = blockchain_implicit_burn:serialize(ImplicitBurn),
+        ok = rocksdb:put(DB, ImplicitBurnsCF, TxnHash, BinImp, [{sync, true}])
+    catch What:Why:Stack ->
+            lager:warning("error adding implicit burn: ~p:~p, ~p", [What, Why, Stack]),
+            {error, Why}
+    end.
+
 %% ------------------------------------------------------------------
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
@@ -1743,20 +1780,20 @@ load(Dir, Mode) ->
     case open_db(Dir) of
         {error, _Reason}=Error ->
             Error;
-        {ok, DB, [DefaultCF, BlocksCF, HeightsCF, TempBlocksCF, PlausibleBlocksCF, SnapshotCF]} ->
+        {ok, DB, [DefaultCF, BlocksCF, HeightsCF, TempBlocksCF, PlausibleBlocksCF, SnapshotCF, ImplicitBurnsCF]} ->
             HonorQuickSync = application:get_env(blockchain, honor_quick_sync, false),
             Ledger =
                 case Mode of
                     blessed_snapshot when HonorQuickSync == true ->
                         %% use 1 as a noop, but this combo is poorly defined
                         Height = application:get_env(blockchain, blessed_snapshot_block_height, 1),
-                        L = blockchain_ledger_v1:new(Dir),
+                        L = blockchain_ledger_v1:new(Dir, DB, BlocksCF, HeightsCF),
                         case blockchain_ledger_v1:current_height(L) of
                             {ok, 1} ->
                                 L;
                             {ok, CHt} when CHt < Height ->
                                 blockchain_ledger_v1:clean(L),
-                                blockchain_ledger_v1:new(Dir);
+                                blockchain_ledger_v1:new(Dir, DB, BlocksCF, HeightsCF);
                             {ok, _} ->
                                 L;
                             %% if we can't open the ledger and we can
@@ -1764,10 +1801,10 @@ load(Dir, Mode) ->
                             %% just reload
                             {error, _} ->
                                 blockchain_ledger_v1:clean(L),
-                                blockchain_ledger_v1:new(Dir)
+                                blockchain_ledger_v1:new(Dir, DB, BlocksCF, HeightsCF)
                         end;
                     _ ->
-                        L = blockchain_ledger_v1:new(Dir),
+                        L = blockchain_ledger_v1:new(Dir, DB, BlocksCF, HeightsCF),
                         blockchain_ledger_v1:compact(L),
                         L
                 end,
@@ -1779,6 +1816,7 @@ load(Dir, Mode) ->
                 heights=HeightsCF,
                 temp_blocks=TempBlocksCF,
                 plausible_blocks=PlausibleBlocksCF,
+                implicit_burns=ImplicitBurnsCF,
                 snapshots=SnapshotCF,
                 ledger=Ledger
             },
@@ -1936,7 +1974,7 @@ open_db(Dir) ->
     ok = filelib:ensure_dir(DBDir),
     GlobalOpts = application:get_env(rocksdb, global_opts, []),
     DBOptions = [{create_if_missing, true}, {atomic_flush, true}] ++ GlobalOpts,
-    DefaultCFs = ["default", "blocks", "heights", "temp_blocks", "plausible_blocks", "snapshots"],
+    DefaultCFs = ["default", "blocks", "heights", "temp_blocks", "plausible_blocks", "snapshots", "implicit_burns"],
     ExistingCFs =
         case rocksdb:list_column_families(DBDir, DBOptions) of
             {ok, CFs0} ->
@@ -2082,13 +2120,23 @@ init_blessed_snapshot(Blockchain, _HashAndHeight={Hash, Height0}) when is_binary
     case blockchain:height(Blockchain) of
         %% already loaded the snapshot
         {ok, CurrHeight} when CurrHeight >= Height ->
-            lager:info("ch ~p h ~p: std sync", [CurrHeight, Height]),
+            lager:debug("ch ~p h ~p: std sync", [CurrHeight, Height]),
             blockchain_worker:maybe_sync(),
             Blockchain;
         %% chain lower than the snapshot
         {ok, CurrHeight} ->
-            lager:info("ch ~p h ~p: snap sync", [CurrHeight, Height]),
-            blockchain_worker:snapshot_sync(Hash, Height),
+            lager:debug("ch ~p h ~p: snap sync", [CurrHeight, Height]),
+            case get_snapshot(Hash, Blockchain) of
+               {ok, Snap} ->
+                  lager:info("Got snapshot for height ~p - attempting install", [Height0]),
+                  blockchain_worker:install_snapshot(Hash, Snap);
+               {error, not_found} ->
+                  blockchain_worker:snapshot_sync(Hash, Height);
+               Other ->
+                  lager:error("Got ~p trying to get snapshot at height: ~p hash ~p - attempt to sync",
+                              [Other, Height0, Hash]),
+                  blockchain_worker:snapshot_sync(Hash, Height)
+            end,
             Blockchain;
         %% no chain at all, we need the genesis block first
         _ ->
@@ -2221,25 +2269,26 @@ is_block_plausible(Block, Chain) ->
                     false;
                 {ok, ConsensusAddrs} ->
                     N = length(ConsensusAddrs),
-                    F = (N-1) div 3,
-                    {ok, KeyOrKeys} = get_key_or_keys(Ledger),
-                    Sigs = blockchain_block:signatures(Block),
-                    case blockchain_block:verify_signatures(Block,
-                                                            ConsensusAddrs,
-                                                            Sigs,
-                                                            F + 1,
-                                                            KeyOrKeys)
-                    of
-                        false ->
-                            %% phwit
-                            false;
-                        {true, _, _} ->
-                            true
-                    end
+                    F = (N - 1) div 3,
+
+                    Signees = blockchain_block:verified_signees(Block),
+
+                    SigThreshold =
+                    case blockchain:config(?election_version, blockchain:ledger(Chain)) of
+                        {ok, 5} -> (2 * F) + 1;         %% much higher v5 onwards
+                        _ -> F + 1                      %% maintain old behavior
+                    end,
+
+                    Received = sets:size(sets:intersection(sets:from_list(ConsensusAddrs),
+                                                           sets:from_list(Signees))),
+
+                    Received >= SigThreshold
+
             end;
         false ->
             false
     end.
+
 
 save_plausible_block(Block, #blockchain{db=DB, plausible_blocks=PlausibleBlocks}) ->
     true = blockchain_lock:check(), %% we need the lock for this
@@ -2313,7 +2362,11 @@ run_absorb_block_hooks(Syncing, Hash, Blockchain) ->
             lager:error("Error creating snapshot, Reason: ~p", [Reason]),
             Error;
         {ok, NewLedger} ->
-            ok = blockchain_worker:notify({add_block, Hash, Syncing, NewLedger})
+            case application:get_env(blockchain, test_mode, false) of
+                false ->
+                    ok = blockchain_worker:notify({add_block, Hash, Syncing, NewLedger});
+                true -> ok
+            end
     end.
 
 %%--------------------------------------------------------------------
@@ -2349,6 +2402,15 @@ snapshot_height(Height) ->
 
 follow_mode() ->
     application:get_env(blockchain, follow_mode, false).
+
+-spec db_handle(Chain :: blockchain()) -> rocksdb:db_handle().
+db_handle(Chain) -> Chain#blockchain.db.
+
+-spec blocks_cf(Chain :: blockchain()) -> rocksdb:cf_handle().
+blocks_cf(Chain) -> Chain#blockchain.blocks.
+
+-spec heights_cf(Chain :: blockchain()) -> rocksdb:cf_handle().
+heights_cf(Chain) -> Chain#blockchain.heights.
 
 %% ------------------------------------------------------------------
 %% EUNIT Tests

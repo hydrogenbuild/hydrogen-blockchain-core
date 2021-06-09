@@ -69,11 +69,15 @@
 -include("blockchain.hrl").
 
 -define(SERVER, ?MODULE).
+
 -ifdef(TEST).
 -define(SYNC_TIME, 1000).
 -else.
 -define(SYNC_TIME, 75000).
 -endif.
+
+-type snap_hash() :: binary().
+-type snapshot_info() :: { Hash :: snap_hash(), Height :: pos_integer() }.
 
 -record(state,
         {
@@ -84,7 +88,7 @@
          sync_ref = make_ref() :: reference(),
          sync_pid :: undefined | pid(),
          sync_paused = false :: boolean(),
-         snapshot_info :: undefined | {binary(), integer()},
+         snapshot_info :: undefined | snapshot_info(),
          gossip_ref = make_ref() :: reference(),
          absorb_info :: undefined | {pid(), reference()},
          absorb_retries = 3 :: pos_integer(),
@@ -353,11 +357,14 @@ handle_call({blockchain, NewChain}, _From, #state{swarm_tid = SwarmTID} = State)
     remove_handlers(SwarmTID),
     {ok, GossipRef} = add_handlers(SwarmTID, NewChain),
     {reply, ok, State#state{blockchain = NewChain, gossip_ref = GossipRef}};
-handle_call({new_ledger, Dir}, _From, State) ->
+handle_call({new_ledger, Dir}, _From, #state{blockchain=Chain}=State) ->
     %% We do this here so the same process that normally owns the ledger
     %% will own it when we do a reset ledger or whatever. Otherwise the
     %% snapshot cache ETS table can be owned by an ephemeral process.
-    Ledger1 = blockchain_ledger_v1:new(Dir),
+    Ledger1 = blockchain_ledger_v1:new(Dir,
+                                       blockchain:db_handle(Chain),
+                                       blockchain:blocks_cf(Chain),
+                                       blockchain:heights_cf(Chain)),
     {reply, {ok, Ledger1}, State};
 
 handle_call({install_snapshot, Hash, Snapshot}, _From,
@@ -373,14 +380,18 @@ handle_call({install_snapshot, Hash, Snapshot}, _From,
             OldLedger = blockchain:ledger(Chain),
             blockchain_ledger_v1:clean(OldLedger),
             %% TODO proper error checking and recovery/retry
-            {ok, NewLedger} = blockchain_ledger_snapshot_v1:import(Chain, Hash, Snapshot),
+            NewLedger = blockchain_ledger_snapshot_v1:import(Chain, Hash, Snapshot),
             Chain1 = blockchain:ledger(NewLedger, Chain),
             ok = blockchain:mark_upgrades(?BC_UPGRADE_NAMES, NewLedger),
             try
-                %% there is a hole in the snapshot history where this will be true, but later it
-                %% will have come from the snap.
-                true = erlang:is_map(Snapshot), % fail into the catch if it's an older record
-                H3dex = maps:get(h3dex, Snapshot), % fail into the catch if it's missing
+                %% There is a hole in the snapshot history where this will be
+                %% true, but later it will have come from the snap.
+
+                %% fail into the catch if it's an older record
+                true = blockchain_ledger_snapshot_v1:is_v6(Snapshot),
+                %% fail into the catch if it's missing
+                H3dex = blockchain_ledger_snapshot_v1:get_h3dex(Snapshot),
+
                 case length(H3dex) > 0 of
                     true -> ok;
                     false -> throw(bootstrap) % fail into the catch it's an empty default value
@@ -712,13 +723,12 @@ maybe_sync_blocks(#state{blockchain = Chain} = State) ->
 snapshot_sync(_Hash, _Height, #state{sync_pid = Pid} = State) when Pid /= undefined ->
     State;
 snapshot_sync(Hash, Height, #state{blockchain = Chain, swarm_tid = SwarmTID, swarm=Swarm} = State) ->
-    case get_peer(SwarmTID) of
+    case get_random_peer(SwarmTID) of
         [] ->
             lager:info("no snapshot peers yet"),
             %% try again later when there's peers
             reset_sync_timer(State#state{snapshot_info = {Hash, Height}, mode = snapshot});
-        Peers ->
-            RandomPeer = lists:nth(rand:uniform(length(Peers)), Peers),
+        RandomPeer ->
             {Pid, Ref} = start_snapshot_sync(Hash, Height, Swarm, Chain, RandomPeer),
             lager:info("snapshot_sync starting ~p ~p", [Pid, Ref]),
             State#state{sync_pid = Pid, sync_ref = Ref, mode = snapshot,
@@ -731,14 +741,13 @@ reset_ledger_to_snap(Hash, Height, State) ->
     snapshot_sync(Hash, Height, State1).
 
 start_sync(#state{blockchain = Chain, swarm = Swarm, swarm_tid = SwarmTID} = State) ->
-    case get_peer(SwarmTID) of
+    case get_random_peer(SwarmTID) of
         [] ->
             %% try again later when there's peers
             schedule_sync(State);
-        Peers ->
-            RandomPeer = lists:nth(rand:uniform(length(Peers)), Peers),
+        RandomPeer ->
             {Pid, Ref} = start_block_sync(Swarm, Chain, RandomPeer),
-            lager:info("new sync starting with Pid: ~p, Ref: ~p", [Pid, Ref]),
+            lager:info("new block sync starting with Pid: ~p, Ref: ~p", [Pid, Ref]),
             State#state{sync_pid = Pid, sync_ref = Ref}
     end.
 
@@ -752,6 +761,14 @@ get_peer(SwarmTID) ->
                              _       -> false
                          end
                  end, Peers0).
+
+get_random_peer(SwarmTID) ->
+    case get_peer(SwarmTID) of
+        [] -> [];
+        Peers ->
+            [Random | _Tail] = blockchain_utils:shuffle(Peers),
+            Random
+    end.
 
 reset_sync_timer(State)  ->
     lager:info("try again in ~p", [?SYNC_TIME]),
@@ -862,8 +879,7 @@ grab_snapshot(Height, Hash) ->
     Swarm = blockchain_swarm:swarm(),
     SwarmTID = libp2p_swarm:tid(Swarm),
 
-    Peers = get_peer(SwarmTID),
-    Peer = hd(Peers),
+    Peer = get_random_peer(SwarmTID),
 
     case libp2p_swarm:dial_framed_stream(Swarm,
                                          Peer,
@@ -894,33 +910,87 @@ grab_snapshot(Height, Hash) ->
     end.
 
 start_snapshot_sync(Hash, Height, Swarm, Chain, Peer) ->
-    lager:info("attempting snapshot sync with ~p", [Peer]),
     spawn_monitor(fun() ->
-        case libp2p_swarm:dial_framed_stream(Swarm,
-                                             Peer,
-                                             ?SNAPSHOT_PROTOCOL,
-                                             blockchain_snapshot_handler,
-                                             [Hash, Height, Chain])
-        of
-            {ok, Stream} ->
-                Ref1 = erlang:monitor(process, Stream),
-                receive
-                    cancel ->
-                        lager:info("snapshot sync cancelled"),
-                        libp2p_framed_stream:close(Stream);
-                    {'DOWN', Ref1, process, Stream, normal} ->
-                        ok;
-                    {'DOWN', Ref1, process, Stream, Reason} ->
-                        lager:info("snapshot sync failed with error ~p", [Reason]),
-                        ok
-                after timer:minutes(15) ->
-                        ok
-                end;
-            _ ->
-                ok
-        end
-    end).
+                          try
+                              case application:get_env(blockchain, s3_base_url, undefined) of
+                                  undefined -> throw({error, no_s3_base_url});
+                                  BaseUrl ->
+                                      %% we are looking up the configured blessed
+                                      %% height again because the height passed
+                                      %% into this function has sometimes been
+                                      %% adjusted either +1 or -1
+                                      {ok, ConfigHeight} = application:get_env(blockchain,
+                                                                blessed_snapshot_block_height),
+                                      Url = build_url(BaseUrl, ConfigHeight),
+                                      {ok, BinSnap} = attempt_fetch_s3_snapshot(Url),
+                                      lager:info("Successfully downloaded snap from ~p", [Url]),
+                                      {ok, Snap} = blockchain_ledger_snapshot_v1:deserialize(Hash,
+                                                                                             BinSnap),
+                                      SnapHeight = blockchain_ledger_snapshot_v1:height(Snap),
+                                      ok = blockchain:add_bin_snapshot(BinSnap, SnapHeight,
+                                                                       Hash, Chain),
+                                      lager:info("Stored snap ~p - attempting install",
+                                                 [SnapHeight]),
+                                      blockchain_worker:install_snapshot(Hash, Snap)
+                              end
+                          catch
+                              _Type:Error:St ->
+                                  lager:error("S3 download failed because ~p: ~p", [Error, St]),
+                                  attempt_fetch_p2p_snapshot(Hash, Height, Swarm, Chain, Peer)
+                          end
+                  end).
 
+attempt_fetch_p2p_snapshot(Hash, Height, Swarm, Chain, Peer) ->
+    lager:info("attempting snapshot sync with ~p", [Peer]),
+    case libp2p_swarm:dial_framed_stream(Swarm, Peer,
+                                         ?SNAPSHOT_PROTOCOL,
+                                         blockchain_snapshot_handler,
+                                         [Hash, Height, Chain]) of
+        {ok, Stream} ->
+            Ref1 = erlang:monitor(process, Stream),
+            receive
+                cancel ->
+                    lager:info("snapshot sync cancelled"),
+                    libp2p_framed_stream:close(Stream);
+                {'DOWN', Ref1, process, Stream, normal} ->
+                    ok;
+                {'DOWN', Ref1, process, Stream, Reason} ->
+                    lager:info("snapshot sync failed with error ~p", [Reason]),
+                    ok
+            after timer:minutes(15) ->
+                    ok
+            end;
+        _ ->
+            ok
+    end.
+
+build_url(BaseUrl, Height) ->
+    %% add 1 to the height here to compensate for the -1 in blockchain:init_blessed_snapshot
+    HeightStr = integer_to_list(Height),
+    Filename = "snap-" ++ HeightStr,
+    BaseUrl ++ "/" ++ Filename.
+
+attempt_fetch_s3_snapshot(Url) ->
+    %% httpc and ssl applications are started in the top level blockchain supervisor
+    Headers = [
+               {"user-agent", "blockchain-worker-1"}
+              ],
+    HTTPOptions = [
+                   {timeout, 900000}, % milliseconds, 900 sec overall request timeout
+                   {connect_timeout, 60000} % milliseconds, 60 second connection timeout
+                  ],
+    Options = [
+               {body_format, binary}, % return body as a binary
+               {full_result, false} % do not return the "full result" response as defined in httpc docs
+              ],
+
+    lager:info("Attempting snapshot download from ~p", [Url]),
+    case httpc:request(get, {Url, Headers}, HTTPOptions, Options) of
+        {ok, {200, Response}} -> {ok, Response};
+        {ok, {404, _Response}} -> throw({error, url_not_found});
+        {ok, {Status, Response}} -> throw({error, {Status, Response}});
+        Other -> throw(Other)
+    end.
 
 send_txn(Txn) ->
     ok = blockchain_txn_mgr:submit(Txn,

@@ -63,6 +63,10 @@ init(Args) ->
     application:ensure_all_started(lager),
     application:ensure_all_started(clique),
     application:ensure_all_started(throttle),
+    %% start http client and ssl here
+    %% currently used for s3 snapshot download
+    ssl:start(),
+    inets:start(httpc, [{profile, blockchain}]),
     ok = blockchain_cli_registry:register_cli(),
     lager:info("~p init with ~p", [?MODULE, Args]),
     GroupMgrArgs =
@@ -81,6 +85,7 @@ init(Args) ->
         [
          {key, proplists:get_value(key, Args)},
          {base_dir, BaseDir},
+         {libp2p_nat, [{enabled, application:get_env(blockchain, enable_nat, true)}]},
          {libp2p_proxy,
           [{limit, application:get_env(blockchain, relay_limit, 25)}]},
          {libp2p_peerbook,

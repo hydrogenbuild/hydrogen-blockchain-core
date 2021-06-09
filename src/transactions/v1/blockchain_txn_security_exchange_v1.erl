@@ -21,6 +21,7 @@
     payee/1,
     amount/1,
     fee/1, fee/2,
+    fee_payer/2,
     calculate_fee/2, calculate_fee/5,
     nonce/1,
     signature/1,
@@ -131,6 +132,10 @@ fee(Txn) ->
 fee(Txn, Fee) ->
     Txn#blockchain_txn_security_exchange_v1_pb{fee=Fee}.
 
+-spec fee_payer(txn_security_exchange(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    payer(Txn).
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -220,10 +225,11 @@ absorb(Txn, Chain) ->
     Ledger = blockchain:ledger(Chain),
     Amount = ?MODULE:amount(Txn),
     Fee = ?MODULE:fee(Txn),
+    Hash = ?MODULE:hash(Txn),
     Payer = ?MODULE:payer(Txn),
     Nonce = ?MODULE:nonce(Txn),
     AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
-    case blockchain_ledger_v1:debit_fee(Payer, Fee, Ledger, AreFeesEnabled) of
+    case blockchain_ledger_v1:debit_fee(Payer, Fee, Ledger, AreFeesEnabled, Hash, Chain) of
         ok ->
             case blockchain_ledger_v1:debit_security(Payer, Amount, Nonce, Ledger) of
                 {error, _Reason}=Error ->

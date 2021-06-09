@@ -22,6 +22,7 @@
     amount/1,
     nonce/1,
     fee/1, fee/2,
+    fee_payer/2,
     memo/1, memo/2,
     calculate_fee/2, calculate_fee/5,
     signature/1,
@@ -90,6 +91,10 @@ fee(Txn) ->
 -spec fee(txn_token_burn(), non_neg_integer()) -> txn_token_burn().
 fee(Txn, Fee) ->
     Txn#blockchain_txn_token_burn_v1_pb{fee=Fee}.
+
+-spec fee_payer(txn_token_burn(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    payer(Txn).
 
 -spec memo(txn_token_burn()) -> non_neg_integer().
 memo(Txn) ->
@@ -181,8 +186,9 @@ absorb(Txn, Chain) ->
     Payer = ?MODULE:payer(Txn),
     Nonce = ?MODULE:nonce(Txn),
     TxnFee = ?MODULE:fee(Txn),
+    TxnHash = ?MODULE:hash(Txn),
     AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
-    case blockchain_ledger_v1:debit_fee(Payer, TxnFee, Ledger, AreFeesEnabled) of
+    case blockchain_ledger_v1:debit_fee(Payer, TxnFee, Ledger, AreFeesEnabled, TxnHash, Chain) of
         {error, _Reason}=Error -> Error;
         ok ->
             case blockchain_ledger_v1:debit_account(Payer, HNTAmount, Nonce, Ledger) of

@@ -24,6 +24,7 @@
     amount/1,
     expire_within/1,
     fee/1, fee/2,
+    fee_payer/2,
     calculate_fee/2, calculate_fee/5,
     signature/1,
     sign/2,
@@ -98,6 +99,10 @@ fee(Txn) ->
 fee(Txn, Fee) ->
     Txn#blockchain_txn_state_channel_open_v1_pb{fee=Fee}.
 
+-spec fee_payer(txn_state_channel_open(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    owner(Txn).
+
 -spec signature(Txn :: txn_state_channel_open()) -> binary().
 signature(Txn) ->
     Txn#blockchain_txn_state_channel_open_v1_pb.signature.
@@ -150,7 +155,8 @@ absorb(Txn, Chain) ->
     Nonce = ?MODULE:nonce(Txn),
     OriginalAmount = ?MODULE:amount(Txn),
     TxnFee = ?MODULE:fee(Txn),
-    case blockchain_ledger_v1:debit_fee(Owner, TxnFee, Ledger, AreFeesEnabled) of
+    TxnHash = ?MODULE:hash(Txn),
+    case blockchain_ledger_v1:debit_fee(Owner, TxnFee, Ledger, AreFeesEnabled, TxnHash, Chain) of
         {error, _Reason}=Error ->
             Error;
         ok ->

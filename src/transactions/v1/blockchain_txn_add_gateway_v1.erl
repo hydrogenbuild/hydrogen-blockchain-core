@@ -25,6 +25,7 @@
     payer_signature/1,
     staking_fee/1, staking_fee/2,
     fee/1, fee/2,
+    fee_payer/2,
     sign/2,
     sign_request/2,
     sign_payer/2,
@@ -146,6 +147,14 @@ staking_fee(Txn, Fee) ->
 -spec fee(txn_add_gateway()) -> non_neg_integer().
 fee(Txn) ->
     Txn#blockchain_txn_add_gateway_v1_pb.fee.
+
+-spec fee_payer(txn_add_gateway(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    Payer = ?MODULE:payer(Txn),
+    case Payer == undefined orelse Payer == <<>> of
+        true -> ?MODULE:owner(Txn);
+        false -> Payer
+    end.
 
 -spec fee(txn_add_gateway(), non_neg_integer()) -> txn_add_gateway().
 fee(Txn, Fee) ->
@@ -316,27 +325,33 @@ is_valid(Txn, Chain) ->
         {_, _, _, false} ->
             {error, payer_invalid_staking_key};
         {true, true, true, true} ->
-            AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
-            Payer = ?MODULE:payer(Txn),
-            Owner = ?MODULE:owner(Txn),
-            ActualPayer = case Payer == undefined orelse Payer == <<>> of
-                true -> Owner;
-                false -> Payer
-            end,
-            StakingFee = ?MODULE:staking_fee(Txn),
-            ExpectedStakingFee = ?MODULE:calculate_staking_fee(Txn, Chain),
-            TxnFee = ?MODULE:fee(Txn),
-            ExpectedTxnFee = ?MODULE:calculate_fee(Txn, Chain),
-            case {(ExpectedTxnFee =< TxnFee orelse not AreFeesEnabled), ExpectedStakingFee == StakingFee} of
-                {false,_} ->
-                    {error, {wrong_txn_fee, {ExpectedTxnFee, TxnFee}}};
-                {_,false} ->
-                    {error, {wrong_staking_fee, {ExpectedStakingFee, StakingFee}}};
-                {true, true} ->
-                    blockchain_ledger_v1:check_dc_or_hnt_balance(ActualPayer, TxnFee + StakingFee, Ledger, AreFeesEnabled)
+
+            %% check this is not also a validator
+            case blockchain_ledger_v1:get_validator(gateway(Txn), Ledger) of
+                {ok, _} ->
+                    %% already a validator
+                    {error, is_validator};
+                _ ->
+                    AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
+                    Payer = ?MODULE:payer(Txn),
+                    Owner = ?MODULE:owner(Txn),
+                    ActualPayer = case Payer == undefined orelse Payer == <<>> of
+                                      true -> Owner;
+                                      false -> Payer
+                                  end,
+                    StakingFee = ?MODULE:staking_fee(Txn),
+                    ExpectedStakingFee = ?MODULE:calculate_staking_fee(Txn, Chain),
+                    TxnFee = ?MODULE:fee(Txn),
+                    ExpectedTxnFee = ?MODULE:calculate_fee(Txn, Chain),
+                    case {(ExpectedTxnFee =< TxnFee orelse not AreFeesEnabled), ExpectedStakingFee == StakingFee} of
+                        {false,_} ->
+                            {error, {wrong_txn_fee, {ExpectedTxnFee, TxnFee}}};
+                        {_,false} ->
+                            {error, {wrong_staking_fee, {ExpectedStakingFee, StakingFee}}};
+                        {true, true} ->
+                            blockchain_ledger_v1:check_dc_or_hnt_balance(ActualPayer, TxnFee + StakingFee, Ledger, AreFeesEnabled)
+                    end
             end
-
-
     end.
 
 %%--------------------------------------------------------------------
@@ -349,15 +364,12 @@ absorb(Txn, Chain) ->
     AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
     Owner = ?MODULE:owner(Txn),
     Gateway = ?MODULE:gateway(Txn),
-    Payer = ?MODULE:payer(Txn),
+    ActualPayer = ?MODULE:fee_payer(Txn, Ledger),
     Fee = ?MODULE:fee(Txn),
+    Hash = ?MODULE:hash(Txn),
     StakingFee = ?MODULE:staking_fee(Txn),
-    ActualPayer = case Payer == undefined orelse Payer == <<>> of
-        true -> Owner;
-        false -> Payer
-    end,
     GatewayMode = gateway_mode(Ledger, ActualPayer),
-    case blockchain_ledger_v1:debit_fee(ActualPayer, Fee + StakingFee, Ledger, AreFeesEnabled) of
+    case blockchain_ledger_v1:debit_fee(ActualPayer, Fee + StakingFee, Ledger, AreFeesEnabled, Hash, Chain) of
         {error, _Reason}=Error -> Error;
         ok -> blockchain_ledger_v1:add_gateway(Owner, Gateway, GatewayMode, Ledger)
     end.

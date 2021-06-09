@@ -25,6 +25,7 @@
     state_channel_expire_at/1,
     closer/1,
     fee/1, fee/2,
+    fee_payer/2,
     calculate_fee/2, calculate_fee/5,
     signature/1,
     sign/2,
@@ -96,6 +97,10 @@ fee(Txn) ->
 -spec fee(txn_state_channel_close(), non_neg_integer()) -> txn_state_channel_close().
 fee(Txn, Fee) ->
     Txn#blockchain_txn_state_channel_close_v1_pb{fee=Fee}.
+
+-spec fee_payer(txn_state_channel_close(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    closer(Txn).
 
 -spec signature(txn_state_channel_close()) -> binary().
 signature(Txn) ->
@@ -325,7 +330,8 @@ absorb(Txn, Chain) ->
     Owner = blockchain_state_channel_v1:owner(SC),
     Closer = ?MODULE:closer(Txn),
     TxnFee = ?MODULE:fee(Txn),
-    case blockchain_ledger_v1:debit_fee(Closer, TxnFee, Ledger, AreFeesEnabled) of
+    TxnHash = ?MODULE:hash(Txn),
+    case blockchain_ledger_v1:debit_fee(Closer, TxnFee, Ledger, AreFeesEnabled, TxnHash, Chain) of
         {error, _Reason}=Error -> Error;
         ok ->
             {MergedSC, HadConflict} = case ?MODULE:conflicts_with(Txn) of

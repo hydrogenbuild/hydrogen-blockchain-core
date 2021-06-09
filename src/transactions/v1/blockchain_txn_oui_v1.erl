@@ -24,6 +24,7 @@
     payer/1,
     staking_fee/1, staking_fee/2,
     fee/1, fee/2,
+    fee_payer/2,
     oui/1,
     owner_signature/1,
     payer_signature/1,
@@ -132,6 +133,10 @@ fee(Txn) ->
 fee(Txn, Fee) ->
     Txn#blockchain_txn_oui_v1_pb{fee=Fee}.
 
+-spec fee_payer(txn_oui(), blockchain_ledger_v1:ledger()) -> libp2p_crypto:pubkey_bin() | undefined.
+fee_payer(Txn, _Ledger) ->
+    payer(Txn).
+
 -spec oui(txn_oui()) -> pos_integer().
 oui(Txn) ->
     Txn#blockchain_txn_oui_v1_pb.oui.
@@ -195,6 +200,7 @@ absorb(Txn, Chain) ->
     Ledger = blockchain:ledger(Chain),
     AreFeesEnabled = blockchain_ledger_v1:txn_fees_active(Ledger),
     TxnFee = ?MODULE:fee(Txn),
+    TxnHash = ?MODULE:hash(Txn),
     StakingFee = ?MODULE:staking_fee(Txn),
     Owner = ?MODULE:owner(Txn),
     Payer = ?MODULE:payer(Txn),
@@ -210,7 +216,7 @@ absorb(Txn, Chain) ->
                 {false, LedgerOUI} ->
                     {error, {invalid_oui, {OUI, LedgerOUI}}};
                 true ->
-                    case blockchain_ledger_v1:debit_fee(ActualPayer, TxnFee + StakingFee, Ledger, AreFeesEnabled) of
+                    case blockchain_ledger_v1:debit_fee(ActualPayer, TxnFee + StakingFee, Ledger, AreFeesEnabled, TxnHash, Chain) of
                         {error, _}=Error ->
                             Error;
                         ok ->
