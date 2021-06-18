@@ -144,7 +144,7 @@ snapshot(Ledger0, Blocks, Mode) ->
                 {
                     max_heap_size,
                     (fun() ->
-                        Mb = application:get_env(blockchain, snapshot_memory_limit, 100),
+                        Mb = application:get_env(blockchain, snapshot_memory_limit, 200),
                         Mb * 1024 * 1024 div erlang:system_info(wordsize)
                     end)()
                 },
@@ -503,9 +503,11 @@ load_blocks(Ledger0, Chain, Snapshot) ->
                       %% hash from the height is an acceptable presence check, and much cheaper
                       case blockchain:get_block_hash(Ht, Chain) of
                           {ok, _Hash} ->
+                              lager:info("skipping block ~p", [Ht]),
                               %% already have it, don't need to store it again.
                               ok;
                           _ ->
+                              lager:info("saving block ~p", [Ht]),
                               ok = blockchain:save_block(Block, Chain)
                       end,
                       case Ht > Curr2 of
@@ -942,6 +944,11 @@ diff(#{}=A, #{}=B) ->
                               [{Field, AI, BI} | Acc];
                           %% we experience the most drift here, so
                           %% it's worth some effort.
+                          accounts ->
+                              AUniq = AI -- BI,
+                              BUniq = BI -- AI,
+                              [{Field, {libp2p_crypto:bin_to_b58(K), blockchain_ledger_entry_v1:deserialize(V), case proplists:get_value(K, BI) of undefined -> undefined; V2 -> blockchain_ledger_entry_v1:deserialize(V2) end}} || {K,V} <- AUniq ] ++
+                              [{Field, {libp2p_crypto:bin_to_b58(K), blockchain_ledger_entry_v1:deserialize(V), undefined}} || {K,V} <- BUniq, not lists:keymember(K, 1, AI) ] ++ Acc;
                           gateways ->
                               AUniq = AI -- BI,
                               BUniq = BI -- AI,
@@ -951,6 +958,8 @@ diff(#{}=A, #{}=B) ->
                                   Diff ->
                                       [{gateways, Diff} | Acc]
                               end;
+                          upgrades ->
+                              [{Field, AI, BI}|Acc];
                           blocks ->
                               AHeightAndHash = [ begin
                                                      Block = blockchain_block:deserialize(Block0),

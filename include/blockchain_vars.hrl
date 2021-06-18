@@ -129,7 +129,7 @@
 -define(min_assert_h3_res, min_assert_h3_res).
 
 %% Number of blocks to wait before a hotspot can submit a poc challenge request
--define(poc_challenge_interval, 60).
+-define(poc_challenge_interval, poc_challenge_interval).
 
 %% Allow to switch POC version
 -define(poc_version, poc_version).
@@ -185,6 +185,7 @@
 -define(witness_redundancy, witness_redundancy).
 -define(poc_reward_decay_rate, poc_reward_decay_rate).
 -define(rewards_txn_version, rewards_txn_version).
+-define(hip15_tx_reward_unit_cap, hip15_tx_reward_unit_cap).
 
 %%%
 %%% bundle txn vars
@@ -456,4 +457,3 @@
 -define(penalty_history_limit, penalty_history_limit). % blocks
 -define(dkg_penalty, dkg_penalty). % float
 -define(tenure_penalty, tenure_penalty). % float
-
